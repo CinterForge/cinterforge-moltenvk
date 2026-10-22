@@ -92,8 +92,8 @@ public:
     /** Called from the MVKCmdBeginQuery command when it is added to the command buffer */
     virtual void beginQueryAddedTo(uint32_t query, MVKCommandBuffer* cmdBuffer) {};
 
-    /** Returns whether all the queries in [firstQuery, endQuery) are available on the device. */
-    bool areQueriesDeviceAvailable(uint32_t firstQuery, uint32_t endQuery);
+    /** Returns whether queryCount queries starting at firstQuery are available on the device. */
+    bool areQueriesDeviceAvailable(uint32_t firstQuery, uint32_t queryCount);
 
 #pragma mark Construction
 
@@ -170,6 +170,44 @@ protected:
 	id<MTLComputeCommandEncoder> encodeComputeCopyResults(MVKCommandEncoder* cmdEncoder, uint32_t firstQuery, uint32_t queryCount, uint32_t index) override;
 
 	id<MTLBuffer> _visibilityResultMTLBuffer;
+};
+
+
+#pragma mark -
+#pragma mark MVKTransformFeedbackQueryPool
+
+/**
+ * A Vulkan query pool for transform feedback stream queries: per query, the primitives written
+ * to the transform feedback buffers and the primitives needed (output by the vertex stream). Draws
+ * capturing transform feedback add their counts on the GPU (geometry-shader capture, stream 0).
+ */
+class MVKTransformFeedbackQueryPool : public MVKQueryPool {
+
+public:
+
+	/** Returns the MTLBuffer holding the results, 2 uint64_t values per query. */
+	id<MTLBuffer> getResultsMTLBuffer() const { return _resultsMTLBuffer; }
+
+	/** Returns the offset of the specified query in the results MTLBuffer. */
+	static NSUInteger getResultOffset(uint32_t query) { return query * 2 * sizeof(uint64_t); }
+
+	void beginQuery(uint32_t query, VkQueryControlFlags flags, MVKCommandEncoder* cmdEncoder) override;
+	void endQuery(uint32_t query, MVKCommandEncoder* cmdEncoder) override;
+	void resetResults(uint32_t firstQuery, uint32_t queryCount, MVKCommandEncoder* cmdEncoder) override;
+
+#pragma mark Construction
+
+	MVKTransformFeedbackQueryPool(MVKDevice* device, const VkQueryPoolCreateInfo* pCreateInfo);
+
+	~MVKTransformFeedbackQueryPool() override;
+
+protected:
+	void propagateDebugName() override;
+	NSData* getQuerySourceData(uint32_t firstQuery, uint32_t queryCount) override;
+	id<MTLBuffer> getResultBuffer(MVKCommandEncoder* cmdEncoder, uint32_t firstQuery, uint32_t queryCount, NSUInteger& offset) override;
+	id<MTLComputeCommandEncoder> encodeComputeCopyResults(MVKCommandEncoder* cmdEncoder, uint32_t firstQuery, uint32_t queryCount, uint32_t index) override;
+
+	id<MTLBuffer> _resultsMTLBuffer;
 };
 
 

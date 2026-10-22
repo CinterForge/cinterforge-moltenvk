@@ -214,6 +214,11 @@ enum MVKDescriptorBindingFlagBits {
 	MVK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT   = VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT,
 	MVK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT             = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
 	MVK_DESCRIPTOR_BINDING_ALL_VULKAN_FLAG_BITS            = 0x0f,
+	/**
+	 * If set, this texel buffer binding of an argument buffer descriptor set stores the texel offset of each view
+	 * (single texel alignment emulation) in the aux buffer, at the index of its texture (like buffer sizes).
+	 */
+	MVK_DESCRIPTOR_BINDING_TEXEL_OFFSET_BIT                = 0x40,
 	/** If set, this binding uses immutable samplers, stored on the descriptor set layout. */
 	MVK_DESCRIPTOR_BINDING_USES_IMMUTABLE_SAMPLERS_BIT     = 0x80,
 };
@@ -234,7 +239,7 @@ struct MVKDescriptorBinding {
 		uint32_t argBufID;  /**< The argument buffer of the first descriptor of this binding in the descriptor set's GPU storage, if using argument encoders. */
 	};
 	union {
-		uint32_t auxIndex;        /**< The index into the descriptor set's metadata for auxiliary buffers (used by BufferAuxSize and OutlinedData). */
+		uint32_t auxIndex;        /**< The index into the descriptor set's metadata for auxiliary buffers (used by BufferAuxSize, OutlinedData and texel buffers with MVK_DESCRIPTOR_BINDING_TEXEL_OFFSET_BIT). */
 		uint32_t immSamplerIndex; /**< The index into the descriptor set layout's immutable sampler list. */
 	};
 
@@ -261,6 +266,7 @@ struct MVKDescriptorBinding {
 
 	bool hasImmutableSamplers() const { return mvkIsAnyFlagEnabled(flags, MVK_DESCRIPTOR_BINDING_USES_IMMUTABLE_SAMPLERS_BIT); }
 	bool isVariable() const { return mvkIsAnyFlagEnabled(flags, MVK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT); }
+	bool hasTexelOffset() const { return mvkIsAnyFlagEnabled(flags, MVK_DESCRIPTOR_BINDING_TEXEL_OFFSET_BIT); }
 };
 
 #pragma mark - MVKDescriptorSetLayout

@@ -38,6 +38,9 @@
 class MVKCommandEncoder;
 class MVKPipelineCache;
 
+/** Implicit buffer index of a stage that has no free Metal buffer index for it. */
+static constexpr uint32_t kMVKUnassignedImplicitBufferIndex = 0xFF;
+
 struct MVKShaderImplicitRezBinding {
 	uint32_t stages[kMVKShaderStageCount];
 };
@@ -213,6 +216,9 @@ protected:
 
 
 #pragma mark -
+/** Divisor of a per-vertex binding in the geometry-shader (mesh) path. */
+static constexpr uint32_t kMVKGeometryPerVertex = 0xFFFFFFFF;
+
 #pragma mark MVKGraphicsPipeline
 
 /** Describes a buffer binding to accommodate vertex attributes with offsets greater than the stride. */
@@ -234,7 +240,6 @@ struct MVKPipelineStageResourceInfo {
 	MVKPipelineBindScript bindScript;
 	MVKImplicitBufferBindings implicitBuffers;
 	bool usesPhysicalStorageBufferAddresses;
-	bool needsRobustBufferAccess2;
 	MVKStageResourceBits resources;
 };
 
@@ -289,6 +294,11 @@ public:
 
     /** Returns the current draw info buffer binding for the mesh shader. */
     uint32_t getDrawInfoBufferIndex() { return _meshDrawInfoBufferIndex; }
+	/** Whether the geometry shader of this (mesh) pipeline captures transform feedback. */
+	bool usesGeometryXfb() const { return _usesGeometryXfb; }
+	/** Metal buffer indices of the geometry-shader transform feedback buffers (buffer b at buffer0 - b). */
+	struct GeometryXfbIndices { uint32_t buffer0, session, prims, mode; };
+	const GeometryXfbIndices& getGeometryXfbIndices() const { return _geometryXfbIndices; }
 
 	/** Returns the Vulkan primitive topology. */
 	VkPrimitiveTopology getVkPrimitiveTopology() { return _vkPrimitiveTopology; }
@@ -323,6 +333,14 @@ public:
 	const MVKStaticBitSet<kMVKMaxBufferCount>& getMtlVertexBuffers() const { return _mtlVertexBuffers; }
 	/** Returns the stride for the given vertex buffer binding (only valid for static strides) */
 	uint32_t getVertexStride(uint32_t binding) const { return _vertexStrides[binding]; }
+	/** Returns the binding stride of the given vertex buffer in a geometry-shader (mesh) pipeline (only valid for static strides). */
+	uint32_t getVkVertexBindingStride(uint32_t binding) const { return _vkVertexBindingStrides[binding]; }
+	/** Returns kMVKGeometryPerVertex for a per-vertex binding of a geometry-shader (mesh) pipeline, else its instance divisor. */
+	uint32_t getVkVertexBindingDivisor(uint32_t binding) const { return _vkVertexBindingDivisors[binding]; }
+	/** Returns the number of vertices of each geometry shader input primitive (1, 2, 3, 4 or 6). */
+	uint32_t getGeometryInputVertexCount() const { return _geometryInputVertexCount; }
+	/** Returns the number of vertices of each geometry shader output primitive (1, 2 or 3). */
+	uint32_t getGeometryOutputVertexCount() const { return _geometryOutputVertexCount; }
 	const VkViewport* getViewports() const { return _viewports; }
 	const VkRect2D* getScissors() const { return _scissors; }
 	const MTLSamplePosition* getSampleLocations() const { return _sampleLocations; }
@@ -360,6 +378,7 @@ protected:
     void addPrevStageOutputToShaderConversionConfig(mvk::SPIRVToMSLConversionConfiguration& shaderConfig, SPIRVShaderOutputs& outputs);
     MTLRenderPipelineDescriptor* newMTLRenderPipelineDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
 #if MVK_XCODE_14
+    bool setGeometryInputPrimitiveType(mvk::SPIRVToMSLConversionConfiguration& shaderConfig);
     MTLMeshRenderPipelineDescriptor* newMTLMeshRenderPipelineDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pGeometrySS, VkPipelineCreationFeedback* pGeometryFB, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
 #endif
     MTLComputePipelineDescriptor* newMTLTessVertexStageDescriptor(const VkGraphicsPipelineCreateInfo* pCreateInfo, const mvk::SPIRVTessReflectionData& reflectData, mvk::SPIRVToMSLConversionConfiguration& shaderConfig, const VkPipelineShaderStageCreateInfo* pVertexSS, VkPipelineCreationFeedback* pVertexFB, const VkPipelineShaderStageCreateInfo* pTessCtlSS, MVKMTLFunction* pVtxFunctions);
@@ -377,6 +396,9 @@ protected:
     bool addFragmentShaderToPipeline(T* plDesc, const VkGraphicsPipelineCreateInfo* pCreateInfo, mvk::SPIRVToMSLConversionConfiguration& shaderConfig, SPIRVShaderOutputs& prevOutput, const VkPipelineShaderStageCreateInfo* pFragmentSS, VkPipelineCreationFeedback* pFragmentFB);
 	template<class T>
 	bool addVertexInputToPipeline(T* inputDesc, const VkPipelineVertexInputStateCreateInfo* pVI, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig);
+	bool verifyVertexInputBindings(const VkPipelineVertexInputStateCreateInfo* pVI, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig);
+	template<class T>
+	bool verifyVertexDescriptor(T* inputDesc, const VkPipelineVertexInputStateCreateInfo* pVI, const mvk::SPIRVToMSLConversionConfiguration& shaderConfig);
 	void adjustVertexInputForMultiview(MTLVertexDescriptor* inputDesc, const VkPipelineVertexInputStateCreateInfo* pVI, uint32_t viewCount, uint32_t oldViewCount = 1);
     void addTessellationToPipeline(MTLRenderPipelineDescriptor* plDesc, const mvk::SPIRVTessReflectionData& reflectData, const VkPipelineTessellationStateCreateInfo* pTS);
 	template<typename T>
@@ -409,6 +431,10 @@ protected:
 	MVKStaticBitSet<kMVKMaxBufferCount> _vkVertexBuffers;
 	MVKStaticBitSet<kMVKMaxBufferCount> _mtlVertexBuffers;
 	uint32_t _vertexStrides[kMVKMaxBufferCount] = {};
+	uint32_t _vkVertexBindingStrides[kMVKMaxBufferCount] = {};
+	uint32_t _vkVertexBindingDivisors[kMVKMaxBufferCount] = {};
+	uint32_t _geometryInputVertexCount = 0;
+	uint32_t _geometryOutputVertexCount = 0;
 	MVKPipelineStageResourceInfo _stageResources[kMVKShaderStageFragment + 1] = {};
 
 	id<MTLComputePipelineState> _mtlTessVertexStageState = nil;
@@ -418,9 +444,12 @@ protected:
 	id<MTLRenderPipelineState> _mtlPipelineState = nil;
 
 	MVKShaderImplicitRezBinding _reservedVertexAttributeBufferCount;
+	uint32_t _occupiedVertexBufferIndices[kMVKShaderStageCount] = {};	// Metal buffer indices of vertex/reserved buffers, by stage
 	VkPrimitiveTopology _vkPrimitiveTopology;
 	uint32_t _outputControlPointCount;
-    uint32_t _meshDrawInfoBufferIndex = 20;
+    uint32_t _meshDrawInfoBufferIndex = 0;
+	GeometryXfbIndices _geometryXfbIndices = {};
+	bool _usesGeometryXfb = false;		// Object stage of a geometry-shader pipeline, below the vertex stage's implicit buffers
 
 	MVKShaderModule* _vertexModule = nullptr;
 	MVKShaderModule* _tessCtlModule = nullptr;

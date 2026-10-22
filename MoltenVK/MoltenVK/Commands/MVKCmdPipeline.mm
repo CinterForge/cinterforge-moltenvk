@@ -269,6 +269,13 @@ template class MVKCmdPipelineBarrier<32>;
 VkResult MVKCmdBindPipeline::setContent(MVKCommandBuffer* cmdBuff, VkPipeline pipeline) {
 	_pipeline = (MVKPipeline*)pipeline;
 
+	// Binding VK_NULL_HANDLE is invalid usage, but it happens when a pipeline failed to compile and the
+	// app does not check (e.g. Venus creates pipelines asynchronously on behalf of a guest). Record the
+	// bind anyway so that later draws and dispatches are skipped instead of using a stale pipeline.
+	if ( !_pipeline ) {
+		cmdBuff->reportMessage(MVK_CONFIG_LOG_LEVEL_WARNING, "vkCmdBindPipeline(): pipeline is VK_NULL_HANDLE (it probably failed to compile). Draws and dispatches will be skipped until a valid pipeline is bound.");
+	}
+
 	cmdBuff->recordBindPipeline(this);
 
 	return VK_SUCCESS;
@@ -283,7 +290,7 @@ void MVKCmdBindGraphicsPipeline::encode(MVKCommandEncoder* cmdEncoder) {
 }
 
 bool MVKCmdBindGraphicsPipeline::isTessellationPipeline() {
-	return ((MVKGraphicsPipeline*)_pipeline)->isTessellationPipeline();
+	return _pipeline && ((MVKGraphicsPipeline*)_pipeline)->isTessellationPipeline();
 }
 
 

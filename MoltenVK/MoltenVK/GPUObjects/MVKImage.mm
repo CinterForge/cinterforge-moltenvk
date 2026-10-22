@@ -123,16 +123,16 @@ id<MTLTexture> MVKImagePlane::getMTLTexture(MTLPixelFormat mtlPixFmt) {
 void MVKImagePlane::releaseMTLTexture() {
     MVKDevice* dev = _image->_device;
     MVKLiveResourceSet& live = dev->getLiveResources();
+    // The Metal objects may still be used by command buffers that have not completed.
     if (id<MTLTexture> tex = _mtlTexture) {
-        dev->removeResidency(tex);
         live.remove(tex);
-        [tex release];
+        dev->releaseMTLResourceAfterQueues(tex, true);
         _mtlTexture = nil;
     }
 
     for (auto& elem : _mtlTextureViews) {
         live.remove(elem.second);
-        [elem.second release];
+        dev->releaseMTLResourceAfterQueues(elem.second, false);
     }
     _mtlTextureViews.clear();
 }
@@ -602,9 +602,8 @@ MVKImageMemoryBinding::MVKImageMemoryBinding(MVKDevice* device, MVKImage* image,
 MVKImageMemoryBinding::~MVKImageMemoryBinding() {
 	if (_deviceMemory) { MVKDeviceMemory::removeImageMemoryBinding(&_deviceMemory, this); }
 	if (_ownsTexelBuffer) {
-		_device->removeResidency(_mtlTexelBuffer);
 		_device->getLiveResources().remove(_mtlTexelBuffer);
-		[_mtlTexelBuffer release];
+		_device->releaseMTLResourceAfterQueues(_mtlTexelBuffer, true);
 	}
 }
 
@@ -822,6 +821,7 @@ VkExtent3D MVKImage::getExtent3D(uint8_t planeIndex, uint32_t mipLevel) {
 }
 
 VkDeviceSize MVKImage::getBytesPerRow(MTLPixelFormat planePixelFormat, uint32_t mipWidth) {
+	if (_explicitRowPitch) { return _explicitRowPitch; }	// Single plane, single mip level (validateExplicitRowPitch())
     size_t bytesPerRow = getPixelFormats()->getBytesPerRow(planePixelFormat, mipWidth);
     return mvkAlignByteCount(bytesPerRow, _rowByteAlignment);
 }
@@ -1162,10 +1162,15 @@ MVKImage::MVKImage(MVKDevice* device, const VkImageCreateInfo* pCreateInfo) : MV
 	_stencilUsage = _usage;
 
 	const VkExternalMemoryImageCreateInfo* pExtMemInfo = nullptr;
+	const VkImageDrmFormatModifierExplicitCreateInfoEXT* pDrmExplicitInfo = nullptr;
 	for (const auto* next = (const VkBaseInStructure*)pCreateInfo->pNext; next; next = next->pNext) {
 		switch (next->sType) {
 			case VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO: {
 				pExtMemInfo = (const VkExternalMemoryImageCreateInfo*)next;
+				break;
+			}
+			case VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT: {
+				pDrmExplicitInfo = (const VkImageDrmFormatModifierExplicitCreateInfoEXT*)next;
 				break;
 			}
 			case VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO: {
@@ -1224,6 +1229,7 @@ MVKImage::MVKImage(MVKDevice* device, const VkImageCreateInfo* pCreateInfo) : MV
 	_isDepthStencilAttachment = (mvkAreAllFlagsEnabled(pCreateInfo->usage, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ||
 								 mvkAreAllFlagsEnabled(pixFmts->getVkFormatProperties3(pCreateInfo->format).optimalTilingFeatures, VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT));
 	_rowByteAlignment = _isLinear || _isLinearForAtomics ? _device->getVkFormatTexelBufferAlignment(pCreateInfo->format, this) : mvkEnsurePowerOfTwo(pixFmts->getBytesPerBlock(pCreateInfo->format));
+	if (pDrmExplicitInfo) { validateExplicitRowPitch(pDrmExplicitInfo); }
 
     VkExtent2D blockTexelSizeOfPlane[3];
     uint32_t bytesPerBlockOfPlane[3];
@@ -1337,7 +1343,39 @@ VkSampleCountFlagBits MVKImage::validateSamples(const VkImageCreateInfo* pCreate
 		validSamples = VK_SAMPLE_COUNT_1_BIT;
 	}
 
+	// Metal cannot create textures with sample counts the device does not support (8 on Apple GPUs). Use the
+	// largest supported count, as graphics pipelines do with rasterizationSamples.
+	VkSampleCountFlagBits supportedSamples = getPhysicalDevice()->getSupportedSampleCount(validSamples);
+	if (supportedSamples != validSamples) {
+		reportWarning(VK_ERROR_FEATURE_NOT_PRESENT, "vkCreateImage() : %u samples are not supported by this device, using %u.",
+					  (uint32_t)validSamples, (uint32_t)supportedSamples);
+		validSamples = supportedSamples;
+	}
+
 	return validSamples;
+}
+
+// A linear image imported from a dma-buf (virglrenderer passes VkImageDrmFormatModifierExplicitCreateInfoEXT
+// with the LINEAR modifier through to a VK_IMAGE_TILING_LINEAR image) must use the row pitch of the buffer.
+// Supported for single-plane, single-level, single-layer 2D images at offset 0.
+void MVKImage::validateExplicitRowPitch(const VkImageDrmFormatModifierExplicitCreateInfoEXT* pDrmExplicitInfo) {
+	static constexpr uint64_t kDRMFormatModLinear = 0;
+	if ( !_isLinear || pDrmExplicitInfo->drmFormatModifier != kDRMFormatModLinear ||
+		 pDrmExplicitInfo->drmFormatModifierPlaneCount != 1 || !pDrmExplicitInfo->pPlaneLayouts ) { return; }
+
+	const VkSubresourceLayout& planeLayout = pDrmExplicitInfo->pPlaneLayouts[0];
+	MVKPixelFormats* pixFmts = getPixelFormats();
+	VkDeviceSize naturalRowPitch = pixFmts->getBytesPerRow(pixFmts->getMTLPixelFormat(_vkFormat), _extent.width);
+	if (pixFmts->getChromaSubsamplingPlaneCount(_vkFormat) > 0 || _mipLevels != 1 || _arrayLayers != 1 ||
+		_extent.depth != 1 || planeLayout.offset != 0 || planeLayout.rowPitch < naturalRowPitch ||
+		(planeLayout.rowPitch % _rowByteAlignment) != 0) {
+		setConfigurationResult(reportError(VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+										   "vkCreateImage() : Explicit LINEAR plane layout (offset %llu, rowPitch %llu) is not supported for this %ux%u image (row pitch at least %llu, multiple of %llu, offset 0, one level and layer).",
+										   planeLayout.offset, planeLayout.rowPitch, _extent.width, _extent.height,
+										   naturalRowPitch, _rowByteAlignment));
+		return;
+	}
+	_explicitRowPitch = planeLayout.rowPitch;
 }
 
 void MVKImage::validateConfig(const VkImageCreateInfo* pCreateInfo, bool isAttachment) {
@@ -2110,7 +2148,7 @@ VkResult MVKImageViewPlane::initSwizzledMTLPixelFormat(const VkImageViewCreateIn
 MVKImageViewPlane::~MVKImageViewPlane() {
 	if (id<MTLTexture> tex = _mtlTexture) {
 		getDevice()->getLiveResources().remove(tex);
-		[tex release];
+		getDevice()->releaseMTLResourceAfterQueues(tex, false);	// May still be used by command buffers
 	}
 }
 

@@ -20,6 +20,7 @@
 #include "MVKPipeline.h"
 #include "MVKFoundation.h"
 #include <sys/stat.h>
+#include <unistd.h>
 
 using namespace std;
 using namespace mvk;
@@ -370,6 +371,11 @@ MVKShaderLibrary* MVKShaderLibraryCache::addShaderLibrary(const SPIRVToMSLConver
 														  const SPIRVToMSLConversionResultInfo& resultInfo,
 														  const MVKCompressor<std::string> compressedMSL) {
 	MVKShaderLibrary* shLib = new MVKShaderLibrary(_owner, resultInfo, compressedMSL);
+	// Cached MSL that no longer compiles is dropped: the shader is converted again when it is used.
+	if ( !shLib->_mtlLibrary ) {
+		shLib->destroy();
+		return nullptr;
+	}
 	_shaderLibraries.emplace_back(*pShaderConfig, shLib);
 	return shLib;
 }
@@ -558,6 +564,7 @@ id<MTLLibrary> MVKShaderLibraryCompiler::newMTLLibrary(NSString* mslSourceCode,
 													   const SPIRVToMSLConversionResultInfo& shaderConversionResults,
 													   const vector<pair<MSLSpecializationMacroInfo, MVKShaderMacroValue>>& specializationMacroDef) {
 	unique_lock<mutex> lock(_completionLock);
+	_mslSourceCode = mslSourceCode;		// For logMSLSource(), from handleError() within compile().
 
 	compile(lock, ^{
 		auto mtlDev = getMTLDevice();
@@ -588,6 +595,7 @@ id<MTLLibrary> MVKShaderLibraryCompiler::newMTLLibrary(NSString* mslSourceCode,
 			}
 		}
 	});
+	_mslSourceCode = nil;
 
 	return [_mtlLibrary retain];
 }
@@ -651,6 +659,101 @@ void MVKShaderLibraryCompiler::handleError() {
 				   (long)_compileError.code, _compileError.localizedDescription.UTF8String);
 	} else {
 		MVKMetalCompiler::handleError();
+		logMSLSource();
+	}
+}
+
+// Writes the MSL of a failed compile to stderr, right after the error, every line prefixed with "[mvk-msl] "
+// (the launcher attaches these lines to its error report): the first lines (without the helper templates
+// SPIRV-Cross puts first, such as spvUnsafeArray, which filled the head of many reports), then the lines
+// around each line the compiler error names ("program_source:LINE:"), prefixed with their line number.
+// One write(), so the lines are not interleaved with other output.
+void MVKShaderLibraryCompiler::logMSLSource() {
+	static constexpr size_t kHeadLineCount = 40;
+	static constexpr size_t kContextLineCount = 5;
+	static constexpr size_t kMaxErrorLocations = 4;
+	static constexpr size_t kMaxLineLength = 512;
+
+	const char* src = _mslSourceCode.UTF8String;
+	if ( !src ) { return; }
+
+	vector<string_view> lines;
+	for (const char* p = src; *p; ) {
+		const char* eol = strchr(p, '\n');
+		size_t len = eol ? size_t(eol - p) : strlen(p);
+		lines.emplace_back(p, len);
+		p += len + (eol ? 1 : 0);
+	}
+
+	string out;
+	auto append = [&](size_t lineNum, string_view text) {
+		out += "[mvk-msl] ";
+		if (lineNum) {
+			out += to_string(lineNum);
+			out += ": ";
+		}
+		if (text.size() > kMaxLineLength) {
+			out.append(text.substr(0, kMaxLineLength));
+			out += " [...]";
+		} else {
+			out.append(text);
+		}
+		out += '\n';
+	};
+
+	size_t headLines = 0, templateLines = 0;
+	for (size_t i = 0; i < lines.size() && headLines < kHeadLineCount; i++) {
+		// A top-level template definition is one line ending with "}" or "};", or runs to the next line that is
+		// "}" or "};" (the end of a multi-line definition).
+		if (lines[i].substr(0, 9) == "template<") {
+			auto endsBlock = [](string_view s) {
+				return (s.size() >= 1 && s.substr(s.size() - 1) == "}") || (s.size() >= 2 && s.substr(s.size() - 2) == "};");
+			};
+			size_t end = i;
+			if ( !endsBlock(lines[i]) ) {
+				while (end + 1 < lines.size() && lines[end] != "}" && lines[end] != "};") { end++; }
+			}
+			templateLines += end - i + 1;
+			i = end;
+			continue;
+		}
+		append(0, lines[i]);
+		headLines++;
+	}
+	if (templateLines) {
+		out += "[mvk-msl] ... (" + to_string(templateLines) + " lines of templates left out)\n";
+	}
+	if (lines.size() > headLines + templateLines) {
+		out += "[mvk-msl] ... (" + to_string(lines.size()) + " lines total)\n";
+	}
+
+	static constexpr char kLocationPrefix[] = "program_source:";
+	vector<size_t> errorLines;
+	const char* errDesc = _compileError.localizedDescription.UTF8String;
+	for (const char* p = errDesc; p && (p = strstr(p, kLocationPrefix)) && errorLines.size() < kMaxErrorLocations; ) {
+		p += sizeof(kLocationPrefix) - 1;
+		size_t lineNum = strtoul(p, nullptr, 10);
+		if (lineNum && lineNum <= lines.size() && find(errorLines.begin(), errorLines.end(), lineNum) == errorLines.end()) {
+			errorLines.push_back(lineNum);
+		}
+	}
+	// Neighboring errors (one per variable of a declaration list, for example) share their context lines: each
+	// line is logged once, in source order.
+	sort(errorLines.begin(), errorLines.end());
+	size_t lastLogged = 0;
+	for (size_t lineNum : errorLines) {
+		size_t first = max(lineNum > kContextLineCount ? lineNum - kContextLineCount : 1, lastLogged + 1);
+		size_t last = min(lineNum + kContextLineCount, lines.size());
+		for (size_t n = first; n <= last; n++) {
+			append(n, lines[n - 1]);
+		}
+		lastLogged = max(lastLogged, last);
+	}
+
+	for (size_t done = 0; done < out.size(); ) {
+		ssize_t written = write(STDERR_FILENO, out.data() + done, out.size() - done);
+		if (written <= 0) { break; }
+		done += size_t(written);
 	}
 }
 

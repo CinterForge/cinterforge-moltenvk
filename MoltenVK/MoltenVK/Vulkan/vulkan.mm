@@ -4128,7 +4128,7 @@ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdSetDepthClampEnableEXT(
 	VkBool32                                    depthClampEnable) {
 
     MVKTraceVulkanCallStart();
-	MVKAddCmd(SetDepthClipEnable, commandBuffer, !depthClampEnable);
+	MVKAddCmd(SetDepthClampEnable, commandBuffer, depthClampEnable);
     MVKTraceVulkanCallEnd();
 }
 
@@ -4406,7 +4406,9 @@ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdBeginQueryIndexedEXT(
 	uint32_t                                    index) {
 
 	MVKTraceVulkanCallStart();
-	// MVKAddCmd(BeginQueryIndexed, commandBuffer, queryPool, query, flags, index);
+	// Only vertex stream 0 is captured (maxTransformFeedbackStreams is 1). Transform feedback queries of other
+	// streams (vkd3d-proton and DXVK use the D3D stream index) are not begun: they end with their reset value 0.
+	if (index == 0) { MVKAddCmd(BeginQuery, commandBuffer, queryPool, query, flags); }
 	MVKTraceVulkanCallEnd();
 }
 
@@ -4456,7 +4458,7 @@ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdEndQueryIndexedEXT(
 	uint32_t                                    index) {
 
 	MVKTraceVulkanCallStart();
-	// MVKAddCmd(EndQueryIndexed, commandBuffer, queryPool, query, index);
+	MVKAddCmd(EndQuery, commandBuffer, queryPool, query);
 	MVKTraceVulkanCallEnd();
 }
 

@@ -19,6 +19,7 @@ MoltenVK 1.4.2
 Released TBD
 
 - Add support for the following extensions:
+  - `VK_EXT_depth_clip_enable`
   - `VK_KHR_external_semaphore_fd`
 - Fix buffer and heap out-of-sync in `initExternalMemory()`.
 - Fix incorrect varable usage in `MVKImagePlane::getMTLTexture()`.

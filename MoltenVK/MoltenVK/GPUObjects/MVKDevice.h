@@ -88,6 +88,7 @@ static constexpr uint32_t   kMVKMaxViewportScissorCount = 16;
 static constexpr uint32_t   kMVKMaxDescriptorSetCount = SPIRV_CROSS_NAMESPACE::kMaxArgumentBuffers;
 static constexpr uint32_t   kMVKMaxTextureCount = 128; // Maximum value across all GPUs in Metal feature set tables
 static constexpr uint32_t   kMVKMaxBufferCount = 31;
+static constexpr uint32_t   kMVKMaxTransformFeedbackBuffers = 4;
 static constexpr uint32_t   kMVKMaxSamplerCount = 16;
 static constexpr uint32_t   kMVKMaxSampleCount = 8;
 static constexpr uint32_t   kMVKSampleLocationCoordinateGridSize = 16;
@@ -121,6 +122,7 @@ typedef struct MVKMTLDeviceCapabilities {
 	bool supportsDepth24Stencil8;
 	bool supports32BitFloatFiltering;
 	bool supports32BitMSAA;
+	bool supportsRenderLinearTextures;
 
 	uint8_t getHighestAppleGPU() const;
 	uint8_t getHighestMacGPU() const;
@@ -202,6 +204,11 @@ public:
 	/** Returns the name of this device. */
 	const char* getName() { return _properties.deviceName; }
 
+	/** Returns whether this GPU is in the affected AMD Mac family for the reversed-depth viewport workaround. */
+	bool needsAMDMac2ReversedDepthViewportWorkaround() const;
+
+	/** Returns whether reversed-depth viewports should be emulated instead of passed through to Metal. */
+	bool shouldEmulateReversedDepthViewport() const;
 	/** Populates the specified structure with the format properties of this device. */
 	void getFormatProperties(VkFormat format, VkFormatProperties* pFormatProperties);
 
@@ -414,6 +421,16 @@ public:
 	/** Returns whether or not vertex instancing can be used to implement multiview. */
 	bool canUseInstancingForMultiview() { return _metalFeatures.layeredRendering; }
 
+	/** Returns whether Metal OpenGL mode is enabled and available. */
+	bool canUseMetalOpenGLMode() const;
+
+	/** Returns the largest sample count supported by the device that is not greater than the specified count. */
+	VkSampleCountFlagBits getSupportedSampleCount(VkSampleCountFlagBits sampleCount) const {
+		uint32_t count = sampleCount;
+		while (count > VK_SAMPLE_COUNT_1_BIT && !(_metalFeatures.supportedSampleCounts & count)) { count >>= 1; }
+		return count ? (VkSampleCountFlagBits)count : VK_SAMPLE_COUNT_1_BIT;
+	}
+
 	/** Returns the underlying Metal device. */
 	id<MTLDevice> getMTLDevice() const { return _mtlDevice; }
 
@@ -493,6 +510,7 @@ protected:
 	MVKPhysicalDeviceVulkan12NoExtFeatures _vulkan12NoExtFeatures;
 	MVKPhysicalDeviceVulkan14NoExtFeatures _vulkan14NoExtFeatures;
 	MVKPhysicalDeviceMetalFeatures _metalFeatures;
+	bool _supportsMetalOpenGLMode = false;
 	VkPhysicalDeviceProperties _properties;
 	VkPhysicalDeviceTexelBufferAlignmentProperties _texelBuffAlignProperties;
 	VkPhysicalDeviceMemoryProperties _memoryProperties;
@@ -674,6 +692,30 @@ public:
 
 	/** Block the current thread until all queues in this device are idle. */
 	VkResult waitIdle();
+
+	/**
+	 * Releases the Metal resource (MTLBuffer, MTLTexture or MTLHeap; the caller's reference) once every
+	 * MTLCommandBuffer committed so far on the queues of this device has completed, removing it from the
+	 * residency set at that time if removeResidency is true. Queue submissions use command buffers that
+	 * do not retain their resources, and semaphores signal from the GPU before their command buffer
+	 * completes, so an app may destroy a resource (after waiting on the semaphore) while the command
+	 * buffer that used it is still alive: releasing it then makes the command buffer fail with
+	 * kIOGPUCommandBufferCallbackErrorInvalidResource (device lost).
+	 */
+	void releaseMTLResourceAfterQueues(id mtlResource, bool removeResidency);
+
+protected:
+	void flushMTLResourceReleases();
+
+	// Resources waiting for releaseMTLResourceAfterQueues(): collected for a short time, then released
+	// together once one marker command buffer per queue completes.
+	struct MVKPendingMTLRelease { id mtlResource; bool removeResidency; };
+	std::mutex _mtlReleaseLock;
+	std::vector<MVKPendingMTLRelease> _mtlReleases;
+	bool _mtlReleaseFlushScheduled = false;
+	std::atomic<uint32_t> _mtlReleaseBatchesInFlight = 0;	// Scheduled flushes and batches whose markers have not completed
+
+public:
 	
 	/** Mark this device (and optionally the physical device) as lost. Releases all waits for this device. */
 	VkResult markLost(bool alsoMarkPhysicalDevice = false);

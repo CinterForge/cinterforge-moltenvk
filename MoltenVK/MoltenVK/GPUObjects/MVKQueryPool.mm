@@ -100,7 +100,8 @@ VkResult MVKQueryPool::getResults(uint32_t firstQuery,
 	return rqstRslt;
 }
 
-bool MVKQueryPool::areQueriesDeviceAvailable(uint32_t firstQuery, uint32_t endQuery) {
+bool MVKQueryPool::areQueriesDeviceAvailable(uint32_t firstQuery, uint32_t queryCount) {
+	uint32_t endQuery = firstQuery + queryCount;
     for (uint32_t query = firstQuery; query < endQuery; query++) {
         if ( _availability[query] < DeviceAvailable ) { return false; }
     }
@@ -129,13 +130,15 @@ VkResult MVKQueryPool::getResult(uint32_t query, NSData* srcData, uint32_t srcDa
 	bool shouldOutput = (isAvailable || mvkAreAllFlagsEnabled(flags, VK_QUERY_RESULT_PARTIAL_BIT));
 	bool shouldOutput64Bit = mvkAreAllFlagsEnabled(flags, VK_QUERY_RESULT_64_BIT);
 
-	// Output the results of this query
+	// Output the results of this query (_queryElementCount values)
 	if (shouldOutput) {
-		uint64_t rsltVal = ((uint64_t*)srcData.bytes)[query - srcDataQueryOffset];
-		if (shouldOutput64Bit) {
-			*(uint64_t*)pDstData = rsltVal;
-		} else {
-			*(uint32_t*)pDstData = (uint32_t)rsltVal;
+		const uint64_t* pRslts = (const uint64_t*)srcData.bytes + (query - srcDataQueryOffset) * _queryElementCount;
+		for (uint32_t elem = 0; elem < _queryElementCount; elem++) {
+			if (shouldOutput64Bit) {
+				((uint64_t*)pDstData)[elem] = pRslts[elem];
+			} else {
+				((uint32_t*)pDstData)[elem] = (uint32_t)pRslts[elem];
+			}
 		}
 	}
 
@@ -181,8 +184,9 @@ void MVKQueryPool::encodeCopyResults(MVKCommandEncoder* cmdEncoder,
 		state.bindStructBytes(mtlComputeCmdEnc, &stride,     2);
 		state.bindStructBytes(mtlComputeCmdEnc, &queryCount, 3);
 		state.bindStructBytes(mtlComputeCmdEnc, &flags,      4);
+		state.bindStructBytes(mtlComputeCmdEnc, &_queryElementCount, 6);
 		_availabilityLock.lock();
-		cmdEncoder->setComputeBytes(mtlComputeCmdEnc, _availability.data(), _availability.size() * sizeof(Status), 5);
+		cmdEncoder->setComputeBytes(mtlComputeCmdEnc, _availability.data() + firstQuery, queryCount * sizeof(Status), 5);
 		_availabilityLock.unlock();
 
 		// Run one thread per query. Try to fill up a subgroup.
@@ -298,6 +302,65 @@ MVKOcclusionQueryPool::MVKOcclusionQueryPool(MVKDevice* device,
 MVKOcclusionQueryPool::~MVKOcclusionQueryPool() {
     [_visibilityResultMTLBuffer release];
 };
+
+
+#pragma mark -
+#pragma mark MVKTransformFeedbackQueryPool
+
+void MVKTransformFeedbackQueryPool::propagateDebugName() { setMetalObjectLabel(_resultsMTLBuffer, _debugName); }
+
+// Only vertex stream 0 is captured (maxTransformFeedbackStreams is 1); queries of other streams are
+// not begun (see vkCmdBeginQueryIndexedEXT) and keep their reset values of 0.
+void MVKTransformFeedbackQueryPool::beginQuery(uint32_t query, VkQueryControlFlags flags, MVKCommandEncoder* cmdEncoder) {
+	cmdEncoder->beginTransformFeedbackQuery(this, query);
+}
+
+void MVKTransformFeedbackQueryPool::endQuery(uint32_t query, MVKCommandEncoder* cmdEncoder) {
+	cmdEncoder->endTransformFeedbackQuery(this, query);
+	MVKQueryPool::endQuery(query, cmdEncoder);
+}
+
+void MVKTransformFeedbackQueryPool::resetResults(uint32_t firstQuery, uint32_t queryCount, MVKCommandEncoder* cmdEncoder) {
+	MVKQueryPool::resetResults(firstQuery, queryCount, cmdEncoder);
+
+	NSUInteger firstOffset = getResultOffset(firstQuery);
+	NSUInteger lastOffset = getResultOffset(firstQuery + queryCount);
+	if (cmdEncoder) {
+		id<MTLBlitCommandEncoder> blitEncoder = cmdEncoder->getMTLBlitEncoder(kMVKCommandUseResetQueryPool);
+		[blitEncoder fillBuffer: _resultsMTLBuffer range: NSMakeRange(firstOffset, lastOffset - firstOffset) value: 0];
+	} else {  // Host-side reset
+		mvkClear((char*)_resultsMTLBuffer.contents + firstOffset, std::min(lastOffset, _resultsMTLBuffer.length) - firstOffset);
+	}
+}
+
+NSData* MVKTransformFeedbackQueryPool::getQuerySourceData(uint32_t firstQuery, uint32_t queryCount) {
+	return [NSData dataWithBytesNoCopy: (void*)((uintptr_t)_resultsMTLBuffer.contents + getResultOffset(firstQuery))
+								length: getResultOffset(queryCount)
+						  freeWhenDone: false];
+}
+
+id<MTLBuffer> MVKTransformFeedbackQueryPool::getResultBuffer(MVKCommandEncoder*, uint32_t firstQuery, uint32_t, NSUInteger& offset) {
+	offset = getResultOffset(firstQuery);
+	return _resultsMTLBuffer;
+}
+
+id<MTLComputeCommandEncoder> MVKTransformFeedbackQueryPool::encodeComputeCopyResults(MVKCommandEncoder* cmdEncoder, uint32_t firstQuery, uint32_t, uint32_t index) {
+	id<MTLComputeCommandEncoder> mtlCmdEnc = cmdEncoder->getMTLComputeEncoder(kMVKCommandUseCopyQueryPoolResults);
+	cmdEncoder->getMtlCompute().bindBuffer(mtlCmdEnc, _resultsMTLBuffer, getResultOffset(firstQuery), index);
+	return mtlCmdEnc;
+}
+
+MVKTransformFeedbackQueryPool::MVKTransformFeedbackQueryPool(MVKDevice* device, const VkQueryPoolCreateInfo* pCreateInfo)
+	: MVKQueryPool(device, pCreateInfo, 2) {
+	_resultsMTLBuffer = [getMTLDevice() newBufferWithLength: std::max<NSUInteger>(getResultOffset(pCreateInfo->queryCount), 16)
+													options: MTLResourceStorageModeShared | MTLResourceCPUCacheModeDefaultCache];	// retained
+	[_resultsMTLBuffer setLabel: @"Transform Feedback Query Result Buffer"];
+	mvkClear((char*)_resultsMTLBuffer.contents, _resultsMTLBuffer.length);
+}
+
+MVKTransformFeedbackQueryPool::~MVKTransformFeedbackQueryPool() {
+	[_resultsMTLBuffer release];
+}
 
 
 #pragma mark -

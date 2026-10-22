@@ -96,6 +96,62 @@ namespace mvk {
 #pragma mark Functions
 
 	/**
+	 * Given a geometry shader in SPIR-V format, returns the number of vertices of its input primitive
+	 * (1, 2, 4 for lines with adjacency, 3, or 6 for triangles with adjacency), or 0 on error.
+	 */
+	template<typename Vs>
+	static inline uint32_t getGeometryShaderInputVertexCount(const Vs& geom, const std::string& entryName, std::string& errorLog) {
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+		try {
+#endif
+			SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(geom);
+			if (!entryName.empty()) {
+				reflect.set_entry_point(entryName, spv::ExecutionModelGeometry);
+			}
+			const SPIRV_CROSS_NAMESPACE::Bitset& modes = reflect.get_execution_mode_bitset();
+			if (modes.get(spv::ExecutionModeInputPoints)) { return 1; }
+			if (modes.get(spv::ExecutionModeInputLines)) { return 2; }
+			if (modes.get(spv::ExecutionModeInputLinesAdjacency)) { return 4; }
+			if (modes.get(spv::ExecutionModeTriangles)) { return 3; }
+			if (modes.get(spv::ExecutionModeInputTrianglesAdjacency)) { return 6; }
+			errorLog = "The geometry shader does not specify an input primitive.";
+			return 0;
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+		} catch (SPIRV_CROSS_NAMESPACE::CompilerError& ex) {
+			errorLog = ex.what();
+			return 0;
+		}
+#endif
+	}
+
+	/**
+	 * Given a geometry shader in SPIR-V format, returns the number of vertices of each primitive it
+	 * outputs (1 for points, 2 for line strips, 3 for triangle strips), or 0 on error.
+	 */
+	template<typename Vs>
+	static inline uint32_t getGeometryShaderOutputVertexCount(const Vs& geom, const std::string& entryName, std::string& errorLog) {
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+		try {
+#endif
+			SPIRV_CROSS_NAMESPACE::CompilerReflection reflect(geom);
+			if (!entryName.empty()) {
+				reflect.set_entry_point(entryName, spv::ExecutionModelGeometry);
+			}
+			const SPIRV_CROSS_NAMESPACE::Bitset& modes = reflect.get_execution_mode_bitset();
+			if (modes.get(spv::ExecutionModeOutputPoints)) { return 1; }
+			if (modes.get(spv::ExecutionModeOutputLineStrip)) { return 2; }
+			if (modes.get(spv::ExecutionModeOutputTriangleStrip)) { return 3; }
+			errorLog = "The geometry shader does not specify an output primitive.";
+			return 0;
+#ifndef SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
+		} catch (SPIRV_CROSS_NAMESPACE::CompilerError& ex) {
+			errorLog = ex.what();
+			return 0;
+		}
+#endif
+	}
+
+	/**
 	 * Given a tessellation control shader and a tessellation evaluation shader,
 	 * both in SPIR-V format, returns tessellation reflection data.
 	 */

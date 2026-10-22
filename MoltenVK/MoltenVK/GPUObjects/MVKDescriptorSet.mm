@@ -162,6 +162,27 @@ static bool needsAuxBuf(MVKDescriptorGPULayout layout) {
 	return layout == MVKDescriptorGPULayout::BufferAuxSize;
 }
 
+static bool isTexelBuffer(VkDescriptorType type) {
+	return type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+}
+
+/**
+ * Whether texel buffer descriptors of this type keep the texel offsets of single texel alignment emulation in the
+ * aux buffer of an argument buffer descriptor set, at the index of their texture (where buffers keep their sizes).
+ */
+static bool needsTexelOffset(VkDescriptorType type, MVKArgumentBufferMode argBuf, MVKDevice* dev) {
+	return argBuf != MVKArgumentBufferMode::Off && isTexelBuffer(type) &&
+	       dev->getPhysicalDevice()->getMetalFeatures()->emulatedTexelBufferAlignment;
+}
+
+static bool needsAuxOffset(const MVKDescriptorBinding& binding) {
+	return needsAuxOffset(binding.gpuLayout) || binding.hasTexelOffset();
+}
+
+static bool needsAuxBuf(const MVKDescriptorBinding& binding) {
+	return needsAuxBuf(binding.gpuLayout) || binding.hasTexelOffset();
+}
+
 /** Selects an argument buffer mode for the given device.  Descriptor sets on the device may use this mode or Off, but not any others. */
 static MVKArgumentBufferMode pickArgumentBufferMode(MVKDevice* dev) {
 	if (dev->getPhysicalDevice()->isUsingMetalArgumentBuffers()) {
@@ -236,8 +257,9 @@ public:
 			data = 1;
 		assert(planeCount() <= 3 && "Max plane count of any supported type is 3");
 	}
+	/** Merges in another sampler: keeps the maximum plane count (not the sum) and the non-Y'CbCr flag. */
 	void add(ImmutableSamplerPlaneInfo other) {
-		data = (data + (other.data & 0xfffffffe)) | (other.data & 1);
+		data = std::max(data & 0xfffffffe, other.data & 0xfffffffe) | ((data | other.data) & 1);
 	}
 	/** Returns the worst case size, when the full details are unknown. */
 	static ImmutableSamplerPlaneInfo MaxSize() {
@@ -339,6 +361,10 @@ static MVKDescriptorCPULayout pickCPULayout(
 	if (count == 0)
 		return MVKDescriptorCPULayout::None;
 	bool nativeTAtomic = dev->getPhysicalDevice()->getMetalFeatures()->nativeTextureAtomics;
+	// With single texel alignment emulation, texel buffer descriptors of sets without argument buffers also keep the
+	// view's texel offset, for the implicit texture offset buffer (argument buffer sets keep it in their aux buffer).
+	bool texelOffset = dev->getPhysicalDevice()->getMetalFeatures()->emulatedTexelBufferAlignment && argBuf == MVKArgumentBufferMode::Off;
+	MVKDescriptorCPULayout texelBuf = texelOffset ? MVKDescriptorCPULayout::OneIDMeta : MVKDescriptorCPULayout::OneID;
 	switch (type) {
 		case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
 			// Multiplanar images are for ycbcr, which requires a swizzle of IDENTITY, so we don't need to store it.
@@ -351,8 +377,8 @@ static MVKDescriptorCPULayout pickCPULayout(
 		case VK_DESCRIPTOR_TYPE_SAMPLER:                return planes.hasImmutableSamplers() ? MVKDescriptorCPULayout::None : MVKDescriptorCPULayout::OneID;
 		case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:          return MVKDescriptorCPULayout::OneID;
 		case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:          return nativeTAtomic ? MVKDescriptorCPULayout::OneID : MVKDescriptorCPULayout::TwoID2Meta;
-		case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:   return MVKDescriptorCPULayout::OneID;
-		case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:   return nativeTAtomic ? MVKDescriptorCPULayout::OneID : MVKDescriptorCPULayout::TwoID2Meta;
+		case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:   return texelBuf;
+		case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:   return nativeTAtomic ? texelBuf : MVKDescriptorCPULayout::TwoID2Meta;
 		case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:         return MVKDescriptorCPULayout::OneID2Meta;
 		case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:         return MVKDescriptorCPULayout::OneID2Meta;
 		case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: return MVKDescriptorCPULayout::OneID2Meta;
@@ -501,7 +527,10 @@ static uint32_t writeAuxOffsets(uint32_t* write, MVKArrayRef<const MVKDescriptor
 	uint32_t sizeBufIdx = 1; // First is taken by the pointer to the size buf itself
 	for (auto& binding : bindings) {
 		auto layout = binding.gpuLayout;
-		if (needsAuxOffset(layout)) {
+		if (binding.hasTexelOffset()) {
+			// Texture offsets of texel buffers, at the index of the texture (the first element of their layout)
+			write[binding.auxIndex] = base + sizeBufIdx * sizeof(uint32_t);
+		} else if (needsAuxOffset(layout)) {
 			switch (layout) {
 				case MVKDescriptorGPULayout::BufferAuxSize:
 					write[binding.auxIndex] = base + sizeBufIdx * sizeof(uint32_t);
@@ -550,9 +579,10 @@ MVKDescriptorSetLayout* MVKDescriptorSetLayout::Create(MVKDevice* device, const 
 		if (canUseImmutableSamplers(bind.descriptorType) && bind.pImmutableSamplers)
 			numImmutableSamplers += bind.descriptorCount;
 		auto layout = pickGPULayout(bind.descriptorType, bind.descriptorCount, argBufMode, device);
-		if (needsAuxOffset(layout))
+		bool texelOffset = bind.descriptorCount && needsTexelOffset(bind.descriptorType, argBufMode, device);
+		if (needsAuxOffset(layout) || texelOffset)
 			numAuxOffsets++;
-		needsSizeBuf |= needsAuxBuf(layout);
+		needsSizeBuf |= needsAuxBuf(layout) || texelOffset;
 		if (bind.descriptorCount > 0) {
 			if (flagList && mvkIsAnyFlagEnabled(flagList[i], VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT))
 				variableDesc = &bind;
@@ -634,6 +664,8 @@ MVKDescriptorSetLayout* MVKDescriptorSetLayout::Create(MVKDevice* device, const 
 		binding.perDescriptorResourceCount = perDescriptorResourceCount(binding.descriptorType, gpu, argBufMode, device, planes);
 		binding.cpuLayout = cpu;
 		binding.gpuLayout = gpu;
+		if (binding.descriptorCount && needsTexelOffset(binding.descriptorType, argBufMode, device))
+			binding.flags |= MVK_DESCRIPTOR_BINDING_TEXEL_OFFSET_BIT;
 		if (!binding.descriptorCount) {
 			// Write some invalid offsets to make it more noticeable if we try to use this
 			binding.cpuOffset = ~0u;
@@ -668,9 +700,9 @@ MVKDescriptorSetLayout* MVKDescriptorSetLayout::Create(MVKDevice* device, const 
 			gpuOffset += descriptorGPUSizeMetal3(gpu, count);
 		}
 		bindingCount += binding.descriptorType == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK ? 1 : descriptorGPUBindingCount(gpu) * count;
-		if (needsAuxBuf(binding.gpuLayout))
+		if (needsAuxBuf(binding))
 			sizeBufSize = bindingCount;
-		if (needsAuxOffset(binding.gpuLayout))
+		if (needsAuxOffset(binding))
 			binding.auxIndex = auxOffset++;
 		else if (!binding.hasImmutableSamplers())
 			binding.auxIndex = ~0u;
@@ -689,16 +721,16 @@ MVKDescriptorSetLayout* MVKDescriptorSetLayout::Create(MVKDevice* device, const 
 	if (isVariable) {
 		MVKDescriptorBinding& variable = ret->_bindings.back();
 		assert(variable.isVariable());
-		ret->_flags |= MVKFlagList<Flag>(Flag::IsSizeBufVariable,            needsAuxBuf(variable.gpuLayout));
+		ret->_flags |= MVKFlagList<Flag>(Flag::IsSizeBufVariable,            needsAuxBuf(variable));
 		ret->_flags |= MVKFlagList<Flag>(Flag::IsDynamicOffsetCountVariable, needsDynamicOffset(variable.descriptorType));
 		ret->_cpuVariableElementSize = descriptorCPUSize(variable.cpuLayout);
 		ret->_gpuAlignment = gpuAlign;
 		if (argBufMode != MVKArgumentBufferMode::ArgEncoder) {
+			// The variable elements' sizes are in the aux buffer after the descriptors (sizeBufSize counts them), so
+			// the aux buffer starts right after the last variable element.
 			ret->_gpuAuxBase = gpuOffset;
 			ret->_gpuSize = gpuOffset;
 			ret->_gpuVariableElementSize = descriptorGPUSizeMetal3(variable.gpuLayout);
-			if (needsAuxBuf(variable.gpuLayout))
-				ret->_gpuVariableElementSize += sizeof(uint32_t);
 		}
 	} else {
 		if (argBufMode == MVKArgumentBufferMode::ArgEncoder) {
@@ -870,6 +902,13 @@ static id<MTLTexture> getTexture(const void* src, MVKDescriptorUpdateSourceType 
 	}
 }
 
+/** The texel offset of the texel buffer view at the given source pointer (single texel alignment emulation), 0 if null. */
+static uint32_t getTexelOffset(const void* src, MVKDescriptorUpdateSourceType type) {
+	assert(type == MVKDescriptorUpdateSourceType::TexelBuffer);
+	auto* view = *reinterpret_cast<MVKBufferView*const*>(src);
+	return view ? view->getTextureOffset() : 0;
+}
+
 /** Either a pointer, for MTLBuffers, or MTLResourceID, for samplers and textures. */
 union MVKGPUResource {
 	uint64_t gpuAddress;
@@ -986,6 +1025,8 @@ static void writeDescriptorSetGPUBuffer(
 		switch (Layout) {
 			case MVKDescriptorGPULayout::Texture:
 				enc.setTexture(getTexture(src, srcType));
+				if (binding.hasTexelOffset())
+					reinterpret_cast<uint32_t*>(base + auxOffsets[binding.auxIndex])[start + i] = getTexelOffset(src, srcType);
 				break;
 
 			case MVKDescriptorGPULayout::Sampler:
@@ -1007,6 +1048,8 @@ static void writeDescriptorSetGPUBuffer(
 					enc.setNullTexture();
 					enc.setNullBuffer(binding.descriptorCount);
 				}
+				if (binding.hasTexelOffset())
+					reinterpret_cast<uint32_t*>(base + auxOffsets[binding.auxIndex])[start + i] = getTexelOffset(src, srcType);
 				break;
 
 			case MVKDescriptorGPULayout::TexSampSoA: {
@@ -1051,10 +1094,10 @@ static void writeDescriptorSetGPUBuffer(
 					VkDeviceSize bufSize = buf->getByteCount();
 					VkDeviceSize maxRange = info->offset < bufSize ? bufSize - info->offset : 0;
 					VkDeviceSize range = info->range == VK_WHOLE_SIZE ? maxRange : std::min(info->range, maxRange);
-					reinterpret_cast<uint32_t*>(base + auxOffsets[binding.auxIndex])[i] = static_cast<uint32_t>(range);
+					reinterpret_cast<uint32_t*>(base + auxOffsets[binding.auxIndex])[start + i] = static_cast<uint32_t>(range);
 				} else {
 					enc.setNullBuffer();
-					reinterpret_cast<uint32_t*>(base + auxOffsets[binding.auxIndex])[i] = 0;
+					reinterpret_cast<uint32_t*>(base + auxOffsets[binding.auxIndex])[start + i] = 0;
 				}
 				break;
 			}
@@ -1228,6 +1271,15 @@ static void writeDescriptorSetCPUBuffer(
 							id<MTLTexture> tex = img->getMTLTexture();
 							desc->a = tex;
 							desc->meta.img = { static_cast<uint32_t>([tex height] * [tex bufferBytesPerRow]) };
+						} else {
+							*desc = {};
+						}
+						break;
+					case MVKDescriptorUpdateSourceType::TexelBuffer:
+						if (auto* view = *static_cast<MVKBufferView*const*>(src)) {
+							desc->a = view->getMTLTexture();
+							// Only the offset is read (the size of texel buffers is only read for TwoID2Meta descriptors).
+							desc->meta.texel = { 0, view->getTextureOffset() };
 						} else {
 							*desc = {};
 						}
@@ -1482,7 +1534,7 @@ static void copyDescriptorSetBinding(
 						assert(0); // Not fast path
 				}
 			}
-			if (needsAuxBuf(gpu)) {
+			if (needsAuxBuf(*dstBinding)) {
 				// Copy aux buffer data
 				char* src = srcSet->gpuBuffer + srcSet->auxIndices[srcBinding->auxIndex] + srcArrayElement * sizeof(uint32_t);
 				char* dst = dstSet->gpuBuffer + dstSet->auxIndices[dstBinding->auxIndex] + dstArrayElement * sizeof(uint32_t);
@@ -1585,6 +1637,11 @@ static void copyDescriptorSetBinding(
 							copyArgBuf<MVKDescriptorGPULayout::Sampler>(dev, dstEnc, src + sizeof(id), cpuStride, dst, copyCount);
 						}
 					}
+				}
+				if (dstBinding->hasTexelOffset()) {
+					char* src = srcSet->gpuBuffer + srcSet->auxIndices[srcBinding->auxIndex] + srcStart * sizeof(uint32_t);
+					char* dst = dstSet->gpuBuffer + dstSet->auxIndices[dstBinding->auxIndex] + dstStart * sizeof(uint32_t);
+					memcpy(dst, src, copyCount * sizeof(uint32_t));
 				}
 
 				count -= copyCount;
@@ -1933,12 +1990,14 @@ MVKDescriptorPool* MVKDescriptorPool::Create(MVKDevice* device, const VkDescript
 			continue;
 		}
 		MVKDescriptorGPULayout gpu = pickGPULayout(pool.type, 1, argBufMode, device);
-		MVKDescriptorCPULayout cpu = pickCPULayout(pool.type, 1, argBufMode, device);
+		// Sets that may switch argument buffers off can need the larger CPU layout of discrete descriptors (texel offsets).
+		MVKDescriptorCPULayout cpu = pickCPULayout(pool.type, 1, mayDisableArgumentBuffers(device) ? MVKArgumentBufferMode::Off : argBufMode, device);
 		numElem += descriptorGPUBindingCount(gpu) * pool.descriptorCount;
 		cpuSize += alignDescriptorOffset(descriptorCPUSize(cpu), cpuAlign) * pool.descriptorCount;
 		gpuSize += alignDescriptorOffset(maxGPUSize(gpu, sizes), gpuAlign) * pool.descriptorCount;
-		numAuxOffset += needsAuxOffset(gpu) ? pool.descriptorCount : 0;
-		usesAuxBuffer |= gpu == MVKDescriptorGPULayout::BufferAuxSize;
+		bool texelOffset = needsTexelOffset(pool.type, argBufMode, device);
+		numAuxOffset += needsAuxOffset(gpu) || texelOffset ? pool.descriptorCount : 0;
+		usesAuxBuffer |= gpu == MVKDescriptorGPULayout::BufferAuxSize || texelOffset;
 	}
 
 	if (numAuxOffset) {

@@ -283,6 +283,151 @@ kernel void cmdDrawIndirectPopulateIndexes(const device char* srcBuff [[buffer(0
 	}
 }
 
+typedef struct {
+	uint64_t indexBuffer;
+	uint32_t indexed;
+	uint32_t indexSize;
+	uint32_t vertsPerPrim;
+	uint32_t topology;          // 0 list, 1 strip, 2 fan
+	uint32_t vertexStrides[31];
+	uint32_t vertexDivisors[31];
+} MVKGeometryIndirectParams;
+
+typedef struct {
+	int32_t indexed;
+	int32_t indexSize;
+	int64_t indexBuffer;
+	int32_t baseVertex;
+	uint32_t baseInstance;
+	uint32_t vertexStrides[31];
+	uint32_t vertexDivisors[31];
+	uint8_t topoStrip;
+} MVKGeometryDrawInfo;
+
+// Converts Vulkan indirect draws (VkDrawIndirectCommand or VkDrawIndexedIndirectCommand) for a
+// geometry-shader (object + mesh) pipeline: mesh threadgroups = primitives x instances, and the
+// DrawInfo the object stage reads (index buffer at firstIndex, base vertex, base instance).
+// Fragment function of geometry-shader (mesh) pipelines that rasterize without a Vulkan fragment shader.
+fragment void fragCmdMeshWithoutFragmentShader() {}
+
+kernel void cmdCopyUint32(device uint* dst [[buffer(0)]],
+                          const device uint* src [[buffer(1)]]) {
+	dst[0] = src[0];
+}
+
+// Transform feedback of a geometry-shader (mesh) draw: turns the number of vertices each input primitive
+// captured (counting pass) into the vertex slot of its first vertex, or 0xffffffff if the primitive does
+// not fit in every bound transform feedback buffer, and advances the byte offsets of the buffers by the
+// vertices written. Session state as in MVKCommandEncoder::_xfbSession. One threadgroup.
+// With an active transform feedback query (vertsPerPrim = vertices of each output primitive, 0 without
+// a query), adds the primitives written and the primitives needed to its two 64-bit results.
+kernel void cmdXfbScanPrimitives(device uint* prims [[buffer(0)]],
+                                 device uint* session [[buffer(1)]],
+                                 constant uint& count [[buffer(2)]],
+                                 device ulong* query [[buffer(3)]],
+                                 constant uint& vertsPerPrim [[buffer(4)]],
+                                 uint lid [[thread_index_in_threadgroup]],
+                                 uint tgSize [[threads_per_threadgroup]]) {
+	threadgroup uint sums[1024];
+	threadgroup uint carry;
+	threadgroup atomic_uint written;
+	uint used = session[12];
+	uint capacity = 0xFFFFFFFFu;
+	for (uint b = 0; b < 4; b++) {
+		uint size = session[b], start = session[4 + b], stride = session[8 + b];
+		if ((used & (1u << b)) && size && stride) {
+			capacity = min(capacity, size > start ? (size - start) / stride : 0u);
+		}
+	}
+	if (lid == 0) {
+		carry = 0;
+		atomic_store_explicit(&written, 0u, memory_order_relaxed);
+	}
+	threadgroup_barrier(mem_flags::mem_threadgroup);
+	for (uint base = 0; base < count; base += tgSize) {
+		uint i = base + lid;
+		uint c = i < count ? prims[i] : 0u;
+		sums[lid] = c;
+		threadgroup_barrier(mem_flags::mem_threadgroup);
+		for (uint off = 1; off < tgSize; off <<= 1) {
+			uint v = lid >= off ? sums[lid - off] : 0u;
+			threadgroup_barrier(mem_flags::mem_threadgroup);
+			sums[lid] += v;
+			threadgroup_barrier(mem_flags::mem_threadgroup);
+		}
+		uint first = carry + sums[lid] - c;
+		bool fits = ulong(first) + c <= capacity;
+		if (i < count) {
+			prims[i] = fits ? first : 0xFFFFFFFFu;
+			if (fits && c) { atomic_fetch_max_explicit(&written, first + c, memory_order_relaxed); }
+		}
+		threadgroup_barrier(mem_flags::mem_threadgroup);
+		if (lid == tgSize - 1) { carry += sums[lid]; }
+		threadgroup_barrier(mem_flags::mem_threadgroup);
+	}
+	if (lid == 0) {
+		uint w = atomic_load_explicit(&written, memory_order_relaxed);
+		for (uint b = 0; b < 4; b++) {
+			session[16 + b] = session[4 + b];	// Where this draw writes
+			if (used & (1u << b)) { session[4 + b] += w * session[8 + b]; }
+		}
+		if (vertsPerPrim) {
+			query[0] += w / vertsPerPrim;		// Primitives written
+			query[1] += carry / vertsPerPrim;	// Primitives needed: every captured vertex was counted
+		}
+	}
+}
+
+kernel void cmdDrawIndirectGeometryConvertBuffers(const device char* srcBuff [[buffer(0)]],
+                                                  device MTLDispatchThreadgroupsIndirectArguments* destDispatch [[buffer(1)]],
+                                                  device char* destDrawInfo [[buffer(2)]],
+                                                  constant uint32_t& srcStride [[buffer(3)]],
+                                                  constant uint32_t& drawCount [[buffer(4)]],
+                                                  constant MVKGeometryIndirectParams& params [[buffer(5)]],
+                                                  constant uint32_t& drawInfoStride [[buffer(6)]],
+                                                  uint idx [[thread_position_in_grid]]) {
+	if (idx >= drawCount) { return; }
+	const device uint32_t* src = reinterpret_cast<const device uint32_t*>(srcBuff + idx * srcStride);
+	uint32_t count = src[0];
+	uint32_t instanceCount = src[1];
+	uint32_t firstIndex = 0;
+	int32_t baseVertex;
+	uint32_t baseInstance;
+	if (params.indexed) {
+		firstIndex = src[2];
+		baseVertex = as_type<int32_t>(src[3]);
+		baseInstance = src[4];
+	} else {
+		baseVertex = int32_t(src[2]);
+		baseInstance = src[3];
+	}
+	uint32_t primCount;
+	if (params.topology == 2) {
+		primCount = count >= 3 ? count - 2 : 0;			// Triangle fan
+	} else if (params.topology == 1 && params.vertsPerPrim == 6) {
+		primCount = count >= 6 ? (count - 4) / 2 : 0;	// Triangle strip with adjacency
+	} else if (params.topology == 1) {
+		primCount = count >= params.vertsPerPrim ? count - params.vertsPerPrim + 1 : 0;
+	} else {
+		primCount = count / params.vertsPerPrim;
+	}
+	destDispatch[idx].threadgroupsPerGrid[0] = primCount;
+	destDispatch[idx].threadgroupsPerGrid[1] = primCount ? instanceCount : 0;
+	destDispatch[idx].threadgroupsPerGrid[2] = 1;
+
+	device auto& drawInfo = *reinterpret_cast<device MVKGeometryDrawInfo*>(destDrawInfo + idx * drawInfoStride);
+	drawInfo.indexed = int32_t(params.indexed);
+	drawInfo.indexSize = int32_t(params.indexSize);
+	drawInfo.indexBuffer = int64_t(params.indexBuffer + uint64_t(firstIndex) * params.indexSize);
+	drawInfo.baseVertex = baseVertex;
+	drawInfo.baseInstance = baseInstance;
+	for (uint i = 0; i < 31; i++) {
+		drawInfo.vertexStrides[i] = params.vertexStrides[i];
+		drawInfo.vertexDivisors[i] = params.vertexDivisors[i];
+	}
+	drawInfo.topoStrip = uint8_t(params.topology);
+}
+
 kernel void cmdDrawIndirectConvertBuffers(const device char* srcBuff [[buffer(0)]],
                                           device MTLDrawPrimitivesIndirectArguments* destBuff [[buffer(1)]],
                                           constant uint32_t& srcStride [[buffer(2)]],
@@ -451,25 +596,36 @@ typedef enum {
 	VK_QUERY_RESULT_PARTIAL_BIT           = 0x00000008,
 } VkQueryResultFlagBits;
 
+// Each query has elementCount 64-bit results (2 for transform feedback queries), followed by the
+// availability value when requested.
 kernel void cmdCopyQueryPoolResultsToBuffer(const device VisibilityBuffer* src [[buffer(0)]],
                                             device uint8_t* dest [[buffer(1)]],
                                             constant uint& stride [[buffer(2)]],
                                             constant uint& numQueries [[buffer(3)]],
                                             constant uint& flags [[buffer(4)]],
                                             constant QueryStatus* availability [[buffer(5)]],
+                                            constant uint& elementCount [[buffer(6)]],
                                             uint query [[thread_position_in_grid]]) {
 	if (query >= numQueries) { return; }
 	device uint32_t* destCount = (device uint32_t*)(dest + stride * query);
+	bool is64Bit = flags & VK_QUERY_RESULT_64_BIT;
 	if (availability[query] != Initial || flags & VK_QUERY_RESULT_PARTIAL_BIT) {
-		destCount[0] = src[query].count;
-		if (flags & VK_QUERY_RESULT_64_BIT) { destCount[1] = src[query].countHigh; }
+		for (uint e = 0; e < elementCount; e++) {
+			VisibilityBuffer value = src[query * elementCount + e];
+			if (is64Bit) {
+				destCount[2 * e] = value.count;
+				destCount[2 * e + 1] = value.countHigh;
+			} else {
+				destCount[e] = value.count;
+			}
+		}
 	}
 	if (flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) {
-		if (flags & VK_QUERY_RESULT_64_BIT) {
-			destCount[2] = availability[query] != Initial ? 1 : 0;
-			destCount[3] = 0;
+		if (is64Bit) {
+			destCount[2 * elementCount] = availability[query] != Initial ? 1 : 0;
+			destCount[2 * elementCount + 1] = 0;
 		} else {
-			destCount[1] = availability[query] != Initial ? 1 : 0;
+			destCount[elementCount] = availability[query] != Initial ? 1 : 0;
 		}
 	}
 }

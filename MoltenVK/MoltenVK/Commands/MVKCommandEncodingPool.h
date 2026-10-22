@@ -124,6 +124,15 @@ public:
 	/** Returns a MTLComputePipelineState for converting an indirect buffer for use in a tessellated draw. */
 	id<MTLComputePipelineState> getCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(bool indexed);
 
+	/** Returns a MTLComputePipelineState for converting an indirect buffer for a geometry-shader (mesh) draw. */
+	id<MTLComputePipelineState> getCmdDrawIndirectGeometryConvertBuffersMTLComputePipelineState();
+
+	/** Returns a MTLComputePipelineState for copying a 32-bit value between buffers. */
+	id<MTLComputePipelineState> getCmdCopyUint32MTLComputePipelineState();
+
+	/** Returns a MTLComputePipelineState for the transform feedback slots of a geometry-shader draw. */
+	id<MTLComputePipelineState> getCmdXfbScanPrimitivesMTLComputePipelineState();
+
 	/** Returns a MTLComputePipelineState for copying an index buffer for use in an indirect tessellated draw. */
 	id<MTLComputePipelineState> getCmdDrawIndexedCopyIndexBufferMTLComputePipelineState(MTLIndexType type);
 
@@ -172,6 +181,9 @@ protected:
 	id<MTLComputePipelineState> _mtlResolveColorImageComputePipelineState[kColorImageCount] = {nil, nil, nil, nil, nil, nil};
 	id<MTLComputePipelineState> _mtlDrawIndirectConvertBuffersComputePipelineState[2] = {nil, nil};
 	id<MTLComputePipelineState> _mtlDrawIndirectTessConvertBuffersComputePipelineState[2] = {nil, nil};
+	id<MTLComputePipelineState> _mtlDrawIndirectGeometryConvertBuffersComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlCopyUint32ComputePipelineState = nil;
+	id<MTLComputePipelineState> _mtlXfbScanPrimitivesComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlDrawIndexedCopyIndexBufferComputePipelineState[2] = {nil, nil};
 	id<MTLComputePipelineState> _mtlCopyQueryPoolResultsComputePipelineState = nil;
 	id<MTLComputePipelineState> _mtlAccumOcclusionQueryResultsComputePipelineState = nil;

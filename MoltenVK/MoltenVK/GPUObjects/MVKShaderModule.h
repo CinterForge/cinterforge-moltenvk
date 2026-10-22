@@ -320,8 +320,10 @@ protected:
 	bool compileComplete(id<MTLLibrary> mtlLibrary, NSError *error);
 	void handleError() override;
 	void logCompilation(MTLCompileOptions*);
+	void logMSLSource();
 
 	id<MTLLibrary> _mtlLibrary = nil;
+	NSString* _mslSourceCode = nil;		// Not retained, only valid during newMTLLibrary().
 };
 
 

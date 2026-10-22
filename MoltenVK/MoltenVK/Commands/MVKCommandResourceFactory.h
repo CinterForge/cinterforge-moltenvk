@@ -360,6 +360,18 @@ public:
 	id<MTLComputePipelineState> newCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(bool indexed,
 																							MVKVulkanAPIDeviceObject* owner);
 
+	/** Returns a retained empty fragment function, for geometry-shader pipelines without a fragment shader. */
+	id<MTLFunction> newEmptyMeshFragmentFunction();
+
+	/** Returns a new MTLComputePipelineState for copying a 32-bit value between buffers. */
+	id<MTLComputePipelineState> newCmdCopyUint32MTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+
+	/** Returns a new MTLComputePipelineState for the transform feedback slots of a geometry-shader draw. */
+	id<MTLComputePipelineState> newCmdXfbScanPrimitivesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+
+	/** Returns a new MTLComputePipelineState for converting an indirect buffer for a geometry-shader (mesh) draw. */
+	id<MTLComputePipelineState> newCmdDrawIndirectGeometryConvertBuffersMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner);
+
 	/** Returns a new MTLComputePipelineState for copying an index buffer for use in a tessellated draw. */
 	id<MTLComputePipelineState> newCmdDrawIndexedCopyIndexBufferMTLComputePipelineState(MTLIndexType type,
 																						MVKVulkanAPIDeviceObject* owner);

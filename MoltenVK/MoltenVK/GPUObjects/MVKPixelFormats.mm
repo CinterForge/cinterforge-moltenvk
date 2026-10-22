@@ -602,7 +602,7 @@ MTLTextureUsage MVKPixelFormats::getMTLTextureUsage(VkImageUsageFlags vkImageUsa
 	bool isStencilFmt = isStencilFormat(mtlFormat);
 	bool isCombinedDepthStencilFmt = isDepthFmt && isStencilFmt;
 	bool isColorFormat = !(isDepthFmt || isStencilFmt);
-	bool linearRenderSupported = _physicalDevice->getMetalFeatures()->renderLinearTextures;
+	bool linearRenderSupported = _physicalDevice && _physicalDevice->getMetalFeatures()->renderLinearTextures;
 	MVKMTLFmtCaps mtlFmtCaps = getCapabilities(mtlFormat, isExtended);
 
 	MTLTextureUsage mtlUsage = MTLTextureUsageUnknown;
@@ -1579,6 +1579,13 @@ void MVKPixelFormats::setFormatProperties(MVKVkFormatDesc& vkDesc, const MVKMTLD
 		vkProps.optimalTilingFeatures |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT;
 	}
 
+	// Images of depth/stencil-capable formats are always allocated in private memory (see
+	// MVKImage::getMemoryRequirements()), which host image copies cannot access: an image of
+	// such a format with VK_IMAGE_USAGE_HOST_TRANSFER_BIT would have no valid memory type.
+	if (mvkIsAnyFlagEnabled(vkProps.optimalTilingFeatures, VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+		mvkDisableFlags(vkProps.optimalTilingFeatures, VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+	}
+
 	// Vulkan forbids blits between chroma-subsampled formats.
 	// If we can't write the stencil reference from the shader, we can't blit stencil.
 	bool supportsStencilFeedback = gpuCaps.supportsApple5 || gpuCaps.supportsMac2;
@@ -1600,7 +1607,7 @@ void MVKPixelFormats::setFormatProperties(MVKVkFormatDesc& vkDesc, const MVKMTLD
 		// Start with optimal tiling features, and modify.
 		vkProps.linearTilingFeatures = vkProps.optimalTilingFeatures;
 
-        if (!_physicalDevice->getMetalFeatures()->renderLinearTextures) {
+        if (!gpuCaps.supportsRenderLinearTextures) {
             // On macOS IMR GPUs, linear textures cannot be used as attachments, so disable those features.
             mvkDisableFlags(vkProps.linearTilingFeatures, (kMVKVkFormatFeatureFlagsTexColorAtt |
                                                            kMVKVkFormatFeatureFlagsTexDSAtt |

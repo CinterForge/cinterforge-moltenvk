@@ -634,6 +634,7 @@ static MVKBarrierStage commandUseToBarrierStage(MVKCommandUse use) {
 	case kMVKCommandUseDispatch:                     return kMVKBarrierStageCompute; /**< vkCmdDispatch. */
 	case kMVKCommandUseTessellationVertexTessCtl:    return kMVKBarrierStageVertex; /**< vkCmdDraw* - vertex and tessellation control stages. */
 	case kMVKCommandUseDrawIndirectConvertBuffers:   return kMVKBarrierStageVertex; /**< vkCmdDrawIndirect* convert indirect buffers. */
+	case kMVKCommandUseTransformFeedback:            return kMVKBarrierStageVertex; /**< Transform feedback counters and slots. */
 	case kMVKCommandUseCopyQueryPoolResults:         return kMVKBarrierStageCopy; /**< vkCmdCopyQueryPoolResults. */
 	case kMVKCommandUseAccumOcclusionQuery:          return kMVKBarrierStageNone; /**< Any command terminating a Metal render pass with active visibility buffer. */
 	case kMVKCommandConvertUint8Indices:             return kMVKBarrierStageCopy; /**< Converting a Uint8 index buffer to Uint16. */
@@ -863,6 +864,18 @@ void MVKCommandEncoder::restartMetalRenderPassIfNeeded() {
 	}
 }
 
+void MVKCommandEncoder::encodeCopyUint32(id<MTLBuffer> dst, VkDeviceSize dstOffset, id<MTLBuffer> src, VkDeviceSize srcOffset) {
+	bool inRenderPass = _mtlRenderEncoder != nil;
+	if (inRenderPass) { encodeStoreActions(true); }
+	MVKMetalComputeCommandEncoderState& state = getMtlCompute();
+	id<MTLComputeCommandEncoder> mtlEnc = getMTLComputeEncoder(kMVKCommandUseTransformFeedback);
+	state.bindPipeline(mtlEnc, getCommandEncodingPool()->getCmdCopyUint32MTLComputePipelineState());
+	state.bindBuffer(mtlEnc, dst, dstOffset, 0);
+	state.bindBuffer(mtlEnc, src, srcOffset, 1);
+	[mtlEnc dispatchThreadgroups: MTLSizeMake(1, 1, 1) threadsPerThreadgroup: MTLSizeMake(1, 1, 1)];
+	if (inRenderPass) { beginMetalRenderPass(kMVKCommandUseRestartSubpass); }
+}
+
 void MVKCommandEncoder::encodeStoreActions(bool storeOverride) {
 	getSubpass()->encodeStoreActions(this,
 									 _isRenderingEntireAttachment,
@@ -902,7 +915,7 @@ void MVKCommandEncoder::bindPipeline(VkPipelineBindPoint pipelineBindPoint, MVKP
     switch (pipelineBindPoint) {
         case VK_PIPELINE_BIND_POINT_GRAPHICS:
             _state.bindGraphicsPipeline(static_cast<MVKGraphicsPipeline*>(pipeline));
-            static_cast<MVKGraphicsPipeline*>(pipeline)->wasBound(this);
+            if (pipeline) { static_cast<MVKGraphicsPipeline*>(pipeline)->wasBound(this); }
             break;
 
         case VK_PIPELINE_BIND_POINT_COMPUTE:
@@ -1262,6 +1275,22 @@ void MVKCommandEncoder::markTimestamp(MVKTimestampQueryPool* pQueryPool, uint32_
 	}
 }
 
+void MVKCommandEncoder::beginTransformFeedbackQuery(MVKTransformFeedbackQueryPool* pQueryPool, uint32_t query) {
+	_xfbQueryPool = pQueryPool;
+	_xfbQuery = query;
+}
+
+// The query becomes available when the command buffer completes. In a multiview render pass, it uses
+// one query per view of the Metal pass; the counts are in the first one, the others stay 0.
+void MVKCommandEncoder::endTransformFeedbackQuery(MVKTransformFeedbackQueryPool* pQueryPool, uint32_t query) {
+	if (_xfbQueryPool == pQueryPool && _xfbQuery == query) { _xfbQueryPool = nullptr; }
+	uint32_t queryCount = 1;
+	if (isInRenderPass() && getSubpass()->isMultiview()) {
+		queryCount = getSubpass()->getViewCountInMetalPass(_multiviewPassIndex);
+	}
+	addActivatedQueries(pQueryPool, query, queryCount);
+}
+
 // Metal stage GPU counters need to be configured in a Metal render, compute, or BLIT encoder, meaning that the
 // Metal encoder needs to know about any Vulkan timestamp commands that will be executed during the execution
 // of a renderpass, or set of Vulkan dispatch or BLIT commands. In addition, there are a very small number of
@@ -1419,6 +1448,7 @@ NSString* mvkMTLComputeCommandEncoderLabel(MVKCommandUse cmdUse) {
 		case kMVKCommandUseResolveImage:                    return @"Resolve Subpass Attachment ComputeEncoder";
         case kMVKCommandUseTessellationVertexTessCtl:       return @"vkCmdDraw (vertex and tess control stages) ComputeEncoder";
         case kMVKCommandUseDrawIndirectConvertBuffers:      return @"vkCmdDraw (convert indirect buffers) ComputeEncoder";
+        case kMVKCommandUseTransformFeedback:               return @"Transform feedback ComputeEncoder";
         case kMVKCommandUseCopyQueryPoolResults:            return @"vkCmdCopyQueryPoolResults ComputeEncoder";
         case kMVKCommandUseAccumOcclusionQuery:             return @"Post-render-pass occlusion query accumulation ComputeEncoder";
         case kMVKCommandConvertUint8Indices:                return @"Convert Uint8 indices to Uint16 ComputeEncoder";

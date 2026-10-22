@@ -145,6 +145,18 @@ id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdDrawIndirectConvertBuf
 	MVK_ENC_REZ_ACCESS(_mtlDrawIndirectConvertBuffersComputePipelineState[indexed ? 1 : 0], newCmdDrawIndirectConvertBuffersMTLComputePipelineState(indexed, _commandPool));
 }
 
+id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdCopyUint32MTLComputePipelineState() {
+	MVK_ENC_REZ_ACCESS(_mtlCopyUint32ComputePipelineState, newCmdCopyUint32MTLComputePipelineState(_commandPool));
+}
+
+id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdXfbScanPrimitivesMTLComputePipelineState() {
+	MVK_ENC_REZ_ACCESS(_mtlXfbScanPrimitivesComputePipelineState, newCmdXfbScanPrimitivesMTLComputePipelineState(_commandPool));
+}
+
+id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdDrawIndirectGeometryConvertBuffersMTLComputePipelineState() {
+	MVK_ENC_REZ_ACCESS(_mtlDrawIndirectGeometryConvertBuffersComputePipelineState, newCmdDrawIndirectGeometryConvertBuffersMTLComputePipelineState(_commandPool));
+}
+
 id<MTLComputePipelineState> MVKCommandEncodingPool::getCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(bool indexed) {
 	MVK_ENC_REZ_ACCESS(_mtlDrawIndirectTessConvertBuffersComputePipelineState[indexed ? 1 : 0], newCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(indexed, _commandPool));
 }
@@ -243,6 +255,15 @@ void MVKCommandEncodingPool::destroyMetalResources() {
     [_mtlDrawIndirectTessConvertBuffersComputePipelineState[1] release];
     _mtlDrawIndirectTessConvertBuffersComputePipelineState[0] = nil;
     _mtlDrawIndirectTessConvertBuffersComputePipelineState[1] = nil;
+
+    [_mtlDrawIndirectGeometryConvertBuffersComputePipelineState release];
+    _mtlDrawIndirectGeometryConvertBuffersComputePipelineState = nil;
+
+    [_mtlCopyUint32ComputePipelineState release];
+    _mtlCopyUint32ComputePipelineState = nil;
+
+    [_mtlXfbScanPrimitivesComputePipelineState release];
+    _mtlXfbScanPrimitivesComputePipelineState = nil;
 
     [_mtlDrawIndexedCopyIndexBufferComputePipelineState[0] release];
     [_mtlDrawIndexedCopyIndexBufferComputePipelineState[1] release];

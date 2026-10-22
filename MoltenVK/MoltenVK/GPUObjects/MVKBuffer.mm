@@ -240,9 +240,8 @@ void MVKBuffer::detachMemory() {
 	MVKLiveResourceSet& live = _device->getLiveResources();
 	if (id<MTLBuffer> buf = _mtlBuffer) {
 		_mtlBuffer = nil;
-		_device->removeResidency(buf);
 		live.remove(buf);
-		[buf release];
+		_device->releaseMTLResourceAfterQueues(buf, true);	// May still be used by command buffers
 	}
 }
 
@@ -364,8 +363,7 @@ void MVKBufferView::destroy() {
 void MVKBufferView::detachMemory() {
 	if (id<MTLTexture> tex = _mtlTexture) {
 		_device->getLiveResources().remove(tex);
-		_device->removeResidency(tex);
-		[tex release];
+		_device->releaseMTLResourceAfterQueues(tex, true);	// May still be used by command buffers
 		_mtlTexture = nil;
 	}
 }

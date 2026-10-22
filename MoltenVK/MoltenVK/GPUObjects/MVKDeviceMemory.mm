@@ -513,17 +513,17 @@ MVKDeviceMemory::~MVKDeviceMemory() {
 	for (auto& img : _imageMemoryBindings) { img->_deviceMemory = nullptr; }
 	os_unfair_lock_unlock(&s_device_memory_destruction_lock);
 
+	// The Metal objects may still be used by command buffers that have not completed.
 	if (_externalMemoryHandleType & VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT) {
-		[_mtlTexture release];
+		_device->releaseMTLResourceAfterQueues(_mtlTexture, false);
 		_mtlTexture = nil;
 	} else if (id<MTLBuffer> buf = _mtlBuffer) {
 		_mtlBuffer = nil;
-		_device->removeResidency(buf);
 		_device->getLiveResources().remove(buf);
-		[buf release];
+		_device->releaseMTLResourceAfterQueues(buf, true);
 	}
 
-	[_mtlHeap release];
+	_device->releaseMTLResourceAfterQueues(_mtlHeap, false);
 	_mtlHeap = nil;
 
 	freeHostMemory();

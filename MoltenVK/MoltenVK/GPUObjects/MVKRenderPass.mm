@@ -286,7 +286,7 @@ void MVKRenderSubpass::populateMTLRenderPassDescriptor(MTLRenderPassDescriptor* 
 		if ([mtlRPDesc respondsToSelector: @selector(setDitherEnabled:)]) {
 			[mtlRPDesc setDitherEnabled:_isDitheringEnabled];
 		}
-		if ([mtlRPDesc respondsToSelector: @selector(setOpenGLModeEnabled:)]) {
+		if (_renderPass->getPhysicalDevice()->canUseMetalOpenGLMode()) {
 			// Unlocks APIs such as setPrimitiveRestartEnabled.
 			[mtlRPDesc setOpenGLModeEnabled:true];
 		}
@@ -980,7 +980,7 @@ MVKAttachmentDescription::MVKAttachmentDescription(MVKRenderPass* renderPass,
 												   const VkAttachmentDescription* pCreateInfo) {
 	_info.flags = pCreateInfo->flags;
 	_info.format = pCreateInfo->format;
-	_info.samples = pCreateInfo->samples;
+	_info.samples = renderPass->getPhysicalDevice()->getSupportedSampleCount(pCreateInfo->samples);	// Images do the same.
 	_info.loadOp = pCreateInfo->loadOp;
 	_info.storeOp = pCreateInfo->storeOp;
 	_info.stencilLoadOp = pCreateInfo->stencilLoadOp;
@@ -994,6 +994,7 @@ MVKAttachmentDescription::MVKAttachmentDescription(MVKRenderPass* renderPass,
 MVKAttachmentDescription::MVKAttachmentDescription(MVKRenderPass* renderPass,
 												   const VkAttachmentDescription2* pCreateInfo) {
 	_info = *pCreateInfo;
+	_info.samples = renderPass->getPhysicalDevice()->getSupportedSampleCount(pCreateInfo->samples);	// Images do the same.
 	_renderPass = renderPass;
 	_attachmentIndex = uint32_t(_renderPass->_attachments.size());
 }

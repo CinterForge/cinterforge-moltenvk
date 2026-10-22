@@ -364,10 +364,19 @@ void MVKCmdSetDepthWriteEnable::encode(MVKCommandEncoder* cmdEncoder) {
 
 
 #pragma mark -
+#pragma mark MVKCmdSetDepthClampEnable
+
+void MVKCmdSetDepthClampEnable::encode(MVKCommandEncoder* cmdEncoder) {
+	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::DepthClampEnable)._renderState.enable.set(MVKRenderStateEnableFlag::DepthClamp, _value);
+}
+
+
+#pragma mark -
 #pragma mark MVKCmdSetDepthClipEnable
 
 void MVKCmdSetDepthClipEnable::encode(MVKCommandEncoder* cmdEncoder) {
-	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::DepthClipEnable)._renderState.enable.set(MVKRenderStateEnableFlag::DepthClamp, !_value);
+	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::DepthClipEnable)._renderState.depthClipEnable =
+		_value ? MVKDepthClipEnable::Enabled : MVKDepthClipEnable::Disabled;
 }
 
 
@@ -549,7 +558,9 @@ void MVKCmdSetLineWidth::encode(MVKCommandEncoder* cmdEncoder) {
 #pragma mark MVKCmdSetPrimitiveTopology
 
 void MVKCmdSetPrimitiveTopology::encode(MVKCommandEncoder* cmdEncoder) {
-	cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::PrimitiveTopology)._renderState.primitiveType = mvkMTLPrimitiveTypeFromVkPrimitiveTopology(_value);
+	auto& renderState = cmdEncoder->getState().updateDynamicState(MVKRenderStateFlag::PrimitiveTopology)._renderState;
+	renderState.primitiveType = mvkMTLPrimitiveTypeFromVkPrimitiveTopology(_value);
+	renderState.isTriangleFan = _value == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
 }
 
 
@@ -599,7 +610,21 @@ VkResult MVKCmdBeginTransformFeedback::setContent(MVKCommandBuffer* cmdBuff,
 }
 
 void MVKCmdBeginTransformFeedback::encode(MVKCommandEncoder* cmdEncoder) {
-	cmdEncoder->_transformFeedbackEnabled = true;
+	// Session state (see MVKCommandEncoder::_xfbSession): bound sizes, start offsets 0 or from the counters.
+	const MVKMTLBufferAllocation* session = cmdEncoder->getTempMTLBuffer(20 * sizeof(uint32_t), false);
+	uint32_t* state = (uint32_t*)session->getContents();
+	memset(state, 0, 20 * sizeof(uint32_t));
+	for (uint32_t b = 0; b < kMVKMaxTransformFeedbackBuffers; b++) {
+		const auto& binding = cmdEncoder->_xfbBindings[b];
+		state[b] = binding.mtlBuffer ? (uint32_t)std::min<VkDeviceSize>(binding.size, UINT32_MAX) : 0;
+	}
+	cmdEncoder->_xfbSession = session;
+	for (uint32_t i = 0; i < _counterBuffers.size(); i++) {
+		uint32_t b = _firstCounterBuffer + i;
+		if ( !_counterBuffers[i] || b >= kMVKMaxTransformFeedbackBuffers ) { continue; }
+		cmdEncoder->encodeCopyUint32(session->_mtlBuffer, session->_offset + (4 + b) * sizeof(uint32_t),
+									 _counterBuffers[i]->getMTLBuffer(), _counterBuffers[i]->getMTLBufferOffset() + _counterBufferOffsets[i]);
+	}
 }
 
 
@@ -623,7 +648,16 @@ VkResult MVKCmdEndTransformFeedback::setContent(MVKCommandBuffer* cmdBuff,
 }
 
 void MVKCmdEndTransformFeedback::encode(MVKCommandEncoder* cmdEncoder) {
-	cmdEncoder->_transformFeedbackEnabled = false;
+	const MVKMTLBufferAllocation* session = cmdEncoder->_xfbSession;
+	if ( !session ) { return; }
+	// The counter value is the byte offset in the bound range at which transform feedback would resume.
+	for (uint32_t i = 0; i < _counterBuffers.size(); i++) {
+		uint32_t b = _firstCounterBuffer + i;
+		if ( !_counterBuffers[i] || b >= kMVKMaxTransformFeedbackBuffers ) { continue; }
+		cmdEncoder->encodeCopyUint32(_counterBuffers[i]->getMTLBuffer(), _counterBuffers[i]->getMTLBufferOffset() + _counterBufferOffsets[i],
+									 session->_mtlBuffer, session->_offset + (4 + b) * sizeof(uint32_t));
+	}
+	cmdEncoder->_xfbSession = nullptr;
 }
 
 
@@ -642,6 +676,7 @@ VkResult MVKCmdBindTransformFeedbackBuffers::setContent(MVKCommandBuffer* cmdBuf
 	_offsets.resize(bindingCount);
 	memcpy(_offsets.data(), pOffsets, bindingCount * sizeof(VkDeviceSize));
 
+	_sizes.clear();	// Commands are reused from a pool
 	if (pSizes) {
 		_sizes.resize(bindingCount);
 		memcpy(_sizes.data(), pSizes, bindingCount * sizeof(VkDeviceSize));
@@ -653,19 +688,15 @@ VkResult MVKCmdBindTransformFeedbackBuffers::setContent(MVKCommandBuffer* cmdBuf
 }
 
 void MVKCmdBindTransformFeedbackBuffers::encode(MVKCommandEncoder* cmdEncoder) {
-	if (_buffers.size()) {
-		MVKMTLBufferBinding binding;
-		binding.mtlBuffer = _buffers[0]->getMTLBuffer();
-		binding.offset = _buffers[0]->getMTLBufferOffset() + _offsets[0];
-
-		if (_sizes.size()) {
-			VkDeviceSize size = _sizes[0];
-			if (size == VK_WHOLE_SIZE)
-				size = _buffers[0]->getByteCount();
-			binding.size = (uint32_t)size;
-		}
-
-		cmdEncoder->_transformFeedbackBinding.index = cmdEncoder->_transformFeedbackBufferIndex;
-		cmdEncoder->_transformFeedbackBinding.update(binding);
+	for (uint32_t i = 0; i < _buffers.size(); i++) {
+		uint32_t b = _firstBinding + i;
+		if (b >= kMVKMaxTransformFeedbackBuffers) { break; }
+		auto& binding = cmdEncoder->_xfbBindings[b];
+		MVKBuffer* buffer = _buffers[i];
+		if ( !buffer ) { binding = {}; continue; }
+		binding.mtlBuffer = buffer->getMTLBuffer();
+		binding.offset = buffer->getMTLBufferOffset() + _offsets[i];
+		VkDeviceSize size = (_sizes.size() && _sizes[i] != VK_WHOLE_SIZE) ? _sizes[i] : buffer->getByteCount() - _offsets[i];
+		binding.size = size;
 	}
 }

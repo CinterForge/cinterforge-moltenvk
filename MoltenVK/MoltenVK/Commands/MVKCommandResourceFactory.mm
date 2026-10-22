@@ -563,6 +563,22 @@ id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdDrawIndirectPopulat
 	return newMTLComputePipelineState("cmdDrawIndirectPopulateIndexes", owner);
 }
 
+id<MTLFunction> MVKCommandResourceFactory::newEmptyMeshFragmentFunction() {
+	return newFunctionNamed("fragCmdMeshWithoutFragmentShader");
+}
+
+id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdCopyUint32MTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+	return newMTLComputePipelineState("cmdCopyUint32", owner);
+}
+
+id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdXfbScanPrimitivesMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+	return newMTLComputePipelineState("cmdXfbScanPrimitives", owner);
+}
+
+id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdDrawIndirectGeometryConvertBuffersMTLComputePipelineState(MVKVulkanAPIDeviceObject* owner) {
+	return newMTLComputePipelineState("cmdDrawIndirectGeometryConvertBuffers", owner);
+}
+
 id<MTLComputePipelineState> MVKCommandResourceFactory::newCmdDrawIndirectTessConvertBuffersMTLComputePipelineState(bool indexed,
 																												   MVKVulkanAPIDeviceObject* owner) {
 	return newMTLComputePipelineState(indexed

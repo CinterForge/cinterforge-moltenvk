@@ -36,6 +36,7 @@ class MVKRenderPass;
 class MVKFramebuffer;
 class MVKRenderSubpass;
 class MVKQueryPool;
+class MVKTransformFeedbackQueryPool;
 class MVKPipeline;
 class MVKGraphicsPipeline;
 class MVKComputePipeline;
@@ -476,6 +477,12 @@ public:
     /** Marks a timestamp for the specified query. */
     void markTimestamp(MVKTimestampQueryPool* pQueryPool, uint32_t query);
 
+	/** Begins a transform feedback query: capturing draws add their primitive counts to it. */
+	void beginTransformFeedbackQuery(MVKTransformFeedbackQueryPool* pQueryPool, uint32_t query);
+
+	/** Ends the current transform feedback query. */
+	void endTransformFeedbackQuery(MVKTransformFeedbackQueryPool* pQueryPool, uint32_t query);
+
     /** Reset a range of queries. */
     void resetQueries(MVKQueryPool* pQueryPool, uint32_t firstQuery, uint32_t queryCount);
 
@@ -508,9 +515,28 @@ public:
 	/** Indicates whether the current draw is an indexed draw. */
 	bool _isIndexedDraw;
 
-	bool _transformFeedbackEnabled = false;
-	uint32_t _transformFeedbackBufferIndex = 19;
-	MVKMTLBufferBinding _transformFeedbackBinding;
+	/** Transform feedback buffers bound with vkCmdBindTransformFeedbackBuffersEXT (captured by geometry shaders). */
+	struct MVKXfbBufferBinding {
+		id<MTLBuffer> mtlBuffer = nil;
+		VkDeviceSize offset = 0;
+		VkDeviceSize size = 0;
+	};
+	MVKXfbBufferBinding _xfbBindings[kMVKMaxTransformFeedbackBuffers];
+
+	/**
+	 * Transform feedback session state while transform feedback is active (null otherwise), in uints:
+	 * bound size of each buffer at 0, current byte offset of each buffer at 4, stride of each buffer
+	 * at 8, mask of the buffers the geometry shader writes at 12, byte offset of each buffer at the
+	 * start of the current draw at 16 (see SPIRV-Cross emit_mesh_wrapper()).
+	 */
+	const MVKMTLBufferAllocation* _xfbSession = nullptr;
+
+	/** The active transform feedback query (vertex stream 0), or null. */
+	MVKTransformFeedbackQueryPool* _xfbQueryPool = nullptr;
+	uint32_t _xfbQuery = 0;
+
+	/** Copies a 32-bit value between buffers on the GPU (transform feedback counters). Ends the Metal render pass. */
+	void encodeCopyUint32(id<MTLBuffer> dst, VkDeviceSize dstOffset, id<MTLBuffer> src, VkDeviceSize srcOffset);
 
 #pragma mark Construction
 
